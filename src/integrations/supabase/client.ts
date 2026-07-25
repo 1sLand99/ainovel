@@ -1,19 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
-import type { Database } from './types';
-
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
-const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
-
-// 真实的 Supabase 客户端实例
-export const rawSupabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
-  auth: {
-    storage: localStorage,
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-    flowType: 'pkce',
-  }
-});
+import { createLocalUser, createLocalSession } from '@/lib/local-types';
 
 // 本地单机数据库 Fluent API 模拟实现
 class LocalQueryBuilder {
@@ -218,55 +203,20 @@ class LocalQueryBuilder {
   }
 }
 
-// 封装导出全局统一的 supabase 客户端代理对象
+// 本地数据库 Fluent API 代理对象
 export const supabase = {
   from(table: string) {
-    const isLocal = localStorage.getItem("is_local_mode") === "true";
-    if (isLocal) {
-      return new LocalQueryBuilder(table) as any;
-    }
-    return rawSupabase.from(table);
+    return new LocalQueryBuilder(table) as any;
   },
   get auth() {
-    const isLocal = localStorage.getItem("is_local_mode") === "true";
-    if (isLocal) {
-      const localUser = {
-        id: "local-user-id",
-        aud: "authenticated",
-        role: "authenticated",
-        email: "local-user@ainovel.local",
-        created_at: new Date().toISOString(),
-        app_metadata: {},
-        user_metadata: {},
-      };
-      const localSession = {
-        access_token: "local-bypass-token",
-        token_type: "bearer",
-        expires_in: 3600,
-        refresh_token: "local-bypass-refresh",
-        user: localUser,
-      };
-
-      return {
-        signInAnonymously: async () => ({ data: { user: localUser, session: localSession }, error: null }),
-        signInWithPassword: async () => ({ data: { user: localUser, session: localSession }, error: null }),
-        signUp: async () => ({ data: { user: localUser, session: localSession }, error: null }),
-        signInWithOAuth: async () => ({ data: {}, error: null }),
-        signOut: async () => {
-          localStorage.removeItem("is_local_mode");
-          window.location.reload();
-          return { error: null };
-        },
-        getSession: async () => ({ data: { session: localSession }, error: null }),
-        onAuthStateChange: (callback: any) => {
-          // 延迟触发以匹配 React 挂载周期
-          setTimeout(() => {
-            callback("SIGNED_IN", localSession);
-          }, 0);
-          return { data: { subscription: { unsubscribe: () => {} } } };
-        }
-      } as any;
-    }
-    return rawSupabase.auth;
+    const localUser = createLocalUser();
+    const localSession = createLocalSession();
+    return {
+      getSession: async () => ({ data: { session: localSession }, error: null }),
+      onAuthStateChange: (callback: any) => {
+        setTimeout(() => callback("SIGNED_IN", localSession), 0);
+        return { data: { subscription: { unsubscribe: () => {} } } };
+      }
+    } as any;
   }
 };
