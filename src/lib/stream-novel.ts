@@ -1,14 +1,26 @@
 // Streaming helper for novel generation (local direct API call)
 
+import type { NovelSettings } from "@/components/novel-settings/types";
+import { normalizeNovelSettings } from "@/components/novel-settings/types";
+import {
+  buildSystemPrompt,
+  buildUserPrompt,
+  type GenerationMode,
+} from "@/lib/build-prompt";
+import { estimateMaxTokens } from "@/lib/parse-chapter";
+
 export interface StreamNovelParams {
-  mode: "generate" | "outline" | "characters" | "rewrite" | "continue" | "continue_chapter";
-  settings: Record<string, any>;
+  mode: GenerationMode;
+  /** 表单设定；来自 DB 的 settings_json 可能是历史结构，内部会统一清洗 */
+  settings: NovelSettings | unknown;
   model: string;
   apiKey: string;
   apiBaseUrl?: string;
   actualModel?: string;
   temperature?: number;
   novelId?: string;
+  /** 全书大纲，参与提示词拼接以保证续写与大纲一致 */
+  outline?: string | null;
   chapterNumber?: number;
   rewriteContent?: string;
   currentText?: string;
@@ -30,155 +42,184 @@ export async function streamNovelGeneration({
   signal?: AbortSignal;
 }) {
   const provider = params.model.toLowerCase();
-    const isClaude = provider === "claude";
-    const apiKey = params.apiKey || "";
-    const baseUrl = params.apiBaseUrl || (isClaude ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1");
+  const isClaude = provider === "claude";
+  const apiKey = params.apiKey || "";
+  const baseUrl =
+    params.apiBaseUrl || (isClaude ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1");
 
-    // 格式化 API 端点
-    const endpoint = isClaude
-      ? (baseUrl.endsWith("/messages") ? baseUrl : `${baseUrl.trim().replace(/\/+$/, "")}/messages`)
-      : (baseUrl.endsWith("/chat/completions") ? baseUrl : `${baseUrl.trim().replace(/\/+$/, "")}/chat/completions`);
+  // 格式化 API 端点
+  const endpoint = isClaude
+    ? baseUrl.endsWith("/messages")
+      ? baseUrl
+      : `${baseUrl.trim().replace(/\/+$/, "")}/messages`
+    : baseUrl.endsWith("/chat/completions")
+      ? baseUrl
+      : `${baseUrl.trim().replace(/\/+$/, "")}/chat/completions`;
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
 
-    if (isClaude) {
-      headers["x-api-key"] = apiKey;
-      headers["anthropic-version"] = "2023-06-01";
-    } else {
-      if (apiKey) {
-        headers["Authorization"] = `Bearer ${apiKey}`;
+  if (isClaude) {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else if (apiKey) {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  }
+
+  // 统一清洗后再拼接提示词，保证表单里的每一项设定都能进入 prompt
+  const settings = normalizeNovelSettings(params.settings);
+  const systemPrompt = buildSystemPrompt(params.mode);
+  const userPrompt = buildUserPrompt({
+    mode: params.mode,
+    settings,
+    outline: params.outline,
+    chapterNumber: params.chapterNumber,
+    rewriteContent: params.rewriteContent,
+    currentText: params.currentText,
+    currentChapterTitle: params.currentChapterTitle,
+    currentChapterNumber: params.currentChapterNumber,
+  });
+
+  // 大纲与人物卡不受单章字数约束，其余模式按目标字数推算上限
+  const maxTokens =
+    params.mode === "outline" || params.mode === "characters"
+      ? 8192
+      : estimateMaxTokens(settings.chapterWords);
+
+  // temperature 允许为 0（保守模式），必须用 ?? 而非 ||
+  const temperature = params.temperature ?? settings.writingStyle.temperature ?? 0.7;
+
+  const requestBody = isClaude
+    ? {
+        model: params.actualModel || "claude-3-5-sonnet-20241022",
+        system: systemPrompt,
+        messages: [{ role: "user", content: userPrompt }],
+        stream: true,
+        temperature,
+        max_tokens: maxTokens,
       }
+    : {
+        model: params.actualModel || "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        stream: true,
+        temperature,
+        max_tokens: maxTokens,
+      };
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+      signal,
+    });
+
+    if (!resp.ok) {
+      const rawText = await resp.text();
+      if (resp.status === 401 || resp.status === 403) {
+        onError(
+          `API Key 无效或无权访问 [状态码 ${resp.status}]，请到「模型设置」检查 API Key 与 API 地址是否匹配`,
+        );
+        return;
+      }
+      onError(`本地直连 API 失败 [状态码 ${resp.status}]: ${rawText.slice(0, 200) || "无错误详情"}`);
+      return;
     }
 
-    // 构造 Prompt 和参数
-    const systemPrompt = params.mode === "outline"
-      ? "You are a top Chinese web novelist. Generate a detailed novel outline in simplified Chinese. Format as structured markdown."
-      : "You are a top Chinese web novelist with 15 years experience. Write in beautiful, addictive simplified Chinese.";
+    if (!resp.body) {
+      onError("无法获取流式响应");
+      return;
+    }
 
-    const buildUserPrompt = () => {
-      const parts: string[] = [];
-      const s = params.settings;
-      if (s.genres?.length) parts.push(`类型：${s.genres.join("、")}`);
-      if (s.mainCharacter?.name) {
-        const p = s.mainCharacter;
-        parts.push(`主角：${p.name}，${p.gender}，${p.age || "未知"}岁，性格：${p.personality || "未设定"}`);
-      }
-      if (s.worldDetails?.geography) parts.push(`世界观地理：${s.worldDetails.geography}`);
-      if (s.worldDetails?.rules) parts.push(`世界观设定：${s.worldDetails.rules}`);
-      if (s.synopsis) parts.push(`简介：${s.synopsis}`);
-      if (s.writingStyle?.narration) parts.push(`视角：${s.writingStyle.narration}`);
-      if (s.writingStyle?.tone) parts.push(`风格：${s.writingStyle.tone}`);
-      if (s.chapterWords) parts.push(`本章字数要求：约${s.chapterWords}字`);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
 
-      if (params.mode === "generate") {
-        parts.push(`\n请生成第${params.chapterNumber || 1}章`);
-      } else if (params.mode === "outline") {
-        parts.push(`\n请生成一个详细的长篇小说大纲，预计总字数：${s.totalWords || "100000"}字。`);
-      } else if (params.mode === "characters") {
-        parts.push(`\n请为这部小说生成3-5个主要角色的详细人物卡。`);
-      } else if (params.mode === "rewrite") {
-        parts.push(`\n以下是需要重写的章节内容：\n\n${params.rewriteContent}\n\n请帮我重新润色和重写本章。`);
-      } else if (params.mode === "continue_chapter") {
-        parts.push(`\n以下是本章已写的内容：\n\n${params.currentText}\n\n请在这段内容末尾继续往下续写，保持剧情连贯与风格统一。`);
-      } else if (params.mode === "continue") {
-        parts.push(`\n请根据小说大纲继续往下生成下一章。`);
+    /**
+     * 上一行 JSON 解析失败时暂存的 payload。
+     *
+     * 唯一合法的成因是：payload 内部含有原始换行符，被我们按 \n 切行时切断了。
+     * 因此下一行会尝试与它拼接（不还原换行符，那个换行是切分产物）。拼不上就
+     * 说明它本来就是坏数据 —— 丢弃它，并把当前行当作全新的一行重新处理。
+     *
+     * 关键点是绝不把坏行塞回 buffer：那会让坏行反复参与解析，把它后面本来正常
+     * 的数据一起拖垮（此前 “坏包 + 正常包” 相邻时后续内容会整段丢失）。
+     */
+    let pending: string | null = null;
+    /** pending 的长度上限，防止畸形流把内存吃光 */
+    const MAX_PENDING = 1_000_000;
+
+    /** 解析一条 payload 并派发增量；返回是否解析成功 */
+    const consume = (payload: string): boolean => {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(payload);
+      } catch {
+        return false;
       }
-      return parts.join("\n");
+      if (isClaude) {
+        if (parsed.type === "content_block_delta" && parsed.delta?.text) {
+          onDelta(parsed.delta.text);
+        }
+      } else {
+        const content = parsed.choices?.[0]?.delta?.content;
+        if (typeof content === "string" && content) onDelta(content);
+      }
+      return true;
     };
 
-    const userPrompt = buildUserPrompt();
+    /** 处理一条完整的 SSE 行；返回 true 表示流已正常结束（收到 [DONE]） */
+    const handleLine = (rawLine: string): boolean => {
+      const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
 
-    const requestBody = isClaude ? {
-      model: params.actualModel || "claude-3-5-sonnet-20241022",
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-      stream: true,
-      temperature: params.temperature || 0.7,
-      max_tokens: 4096,
-    } : {
-      model: params.actualModel || "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      stream: true,
-      temperature: params.temperature || 0.7,
-      max_tokens: 4096,
+      if (pending !== null) {
+        const candidate = pending + line;
+        pending = null;
+        if (candidate.length <= MAX_PENDING && consume(candidate)) return false;
+        // 拼接失败：说明 pending 是坏数据，丢弃后按新行继续处理当前行
+      }
+
+      if (line.startsWith(":") || line.trim() === "") return false;
+      if (!line.startsWith("data:")) return false;
+
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") return true;
+      if (!payload) return false;
+
+      if (!consume(payload)) pending = payload;
+      return false;
     };
 
-    try {
-      const resp = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(requestBody),
-        signal,
-      });
+    let finished = false;
+    while (!finished) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      if (!resp.ok) {
-        const rawText = await resp.text();
-        onError(`本地直连 API 失败 [状态码 ${resp.status}]: ${rawText.slice(0, 200) || "无错误详情"}`);
-        return;
-      }
-
-      if (!resp.body) {
-        onError("无法获取流式响应");
-        return;
-      }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let parseFailures = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        let newlineIndex: number;
-        while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
-          let line = buffer.slice(0, newlineIndex);
-          buffer = buffer.slice(newlineIndex + 1);
-
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          if (line.startsWith(":") || line.trim() === "") continue;
-          if (!line.startsWith("data: ")) continue;
-
-          const jsonStr = line.slice(6).trim();
-          if (jsonStr === "[DONE]") {
-            await onDone();
-            return;
-          }
-
-          try {
-            const parsed = JSON.parse(jsonStr);
-            parseFailures = 0; // 成功解析时重置计数器
-            if (isClaude) {
-              if (parsed.type === "content_block_delta" && parsed.delta?.text) {
-                onDelta(parsed.delta.text);
-              }
-            } else {
-              const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-              if (content) onDelta(content);
-            }
-          } catch {
-            // json 截断拼回，但限制连续失败次数防止死循环
-            parseFailures++;
-            if (parseFailures > 3) {
-              onError("流式响应格式异常，无法解析数据");
-              return;
-            }
-            buffer = line + "\n" + buffer;
-            break;
-          }
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIndex: number;
+      while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        if (handleLine(line)) {
+          finished = true;
+          break;
         }
       }
-
-      await onDone();
-    } catch (e: any) {
-      if (e.name === "AbortError") return;
-      onError(e.message || "直连大模型时发生网络连接错误（请检查您的网络代理或 API 地址是否正确）");
     }
+
+    // buffer 中可能还留有最后一条没有换行符结尾的完整行
+    if (!finished && buffer.trim()) handleLine(buffer);
+
+    await onDone();
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") return;
+    const message = e instanceof Error ? e.message : "";
+    onError(
+      message || "直连大模型时发生网络连接错误（请检查您的网络代理或 API 地址是否正确）",
+    );
+  }
 }

@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/auth";
 import { streamNovelGeneration } from "@/lib/stream-novel";
+import { parseGeneratedChapter } from "@/lib/parse-chapter";
 import { useModelProviders } from "@/hooks/use-model-providers";
 import { BookOpen, Loader2, Sparkles } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -12,17 +12,16 @@ import { NovelSettings } from "@/components/novel-settings/types";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export default function Generate() {
-  const navigate = useNavigate();
-  const { user, session } = useAuth();
+  const { user } = useAuth();
   const { toast } = useToast();
   const previewRef = useRef<HTMLDivElement>(null);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [previewContent, setPreviewContent] = useState("");
-  const [generationMode, setGenerationMode] = useState("");
   const abortRef = useRef(false);
   const requestAbortControllerRef = useRef<AbortController | null>(null);
-  const [latestSettings, setLatestSettings] = useState<NovelSettings | null>(null);
+  // 大纲模式生成的结果，创作正文时随小说一并入库
+  const [outline, setOutline] = useState("");
 
   const {
     effectiveProvider,
@@ -47,14 +46,8 @@ export default function Generate() {
   }, []);
 
   const handleGenerate = async (mode: GenerateMode, settings: NovelSettings) => {
-    if (!session?.access_token) {
-      toast({ title: "未登录", description: "请先登录", variant: "destructive" });
-      return;
-    }
-    setLatestSettings(settings);
     setIsGenerating(true);
     setPreviewContent("");
-    setGenerationMode(mode);
     abortRef.current = false;
     requestAbortControllerRef.current?.abort();
     const controller = new AbortController();
@@ -70,6 +63,8 @@ export default function Generate() {
         apiBaseUrl: effectiveApiBaseUrl,
         actualModel: effectiveActualModel,
         temperature: settings.writingStyle.temperature,
+        // 已生成的大纲参与首章创作，保证开篇与大纲一致
+        outline: mode === "generate" ? outline : null,
         chapterNumber: 1,
       },
       onDelta: (text) => {
@@ -85,24 +80,18 @@ export default function Generate() {
         // Auto-save based on mode
         if (mode === "generate" && user) {
           try {
-            const lines = fullContent.split("\n").filter((l) => l.trim());
-            // 智能检测第一行是否为章节标题
-            const firstLine = lines[0] || "";
-            const isTitleLine = /^#+\s*/.test(firstLine) || /^第.+章/.test(firstLine);
-            let chapterTitle: string;
-            let chapterContent: string;
-            if (isTitleLine) {
-              chapterTitle = firstLine.replace(/^#+\s*/, "").replace(/^第.+章\s*/, "") || "第一章";
-              chapterContent = lines.slice(1).join("\n").trim();
-            } else {
-              chapterTitle = "第一章";
-              chapterContent = fullContent.trim();
+            const { title: chapterTitle, content: chapterContent } = parseGeneratedChapter(
+              fullContent,
+              "第一章",
+            );
+            if (chapterContent.length < 10) {
+              toast({
+                title: "生成内容过少",
+                description: "生成内容字数不足（少于 10 个字），已拦截保存",
+                variant: "destructive",
+              });
+              return;
             }
-            // 如果解析后内容为空，回退使用完整内容
-            if (!chapterContent) {
-              chapterContent = fullContent.trim();
-            }
-            const initialWordCount = chapterContent.length;
 
             // Create novel
             const { data: novel, error: novelErr } = await supabase
@@ -114,7 +103,9 @@ export default function Generate() {
                   : "未命名小说",
                 genre: settings.genres,
                 settings_json: settings,
-                word_count: initialWordCount,
+                // 持久化大纲，后续续写/重写都会读取它
+                outline: outline || null,
+                word_count: chapterContent.length,
               })
               .select()
               .single();
@@ -131,10 +122,16 @@ export default function Generate() {
             if (chapterErr) throw chapterErr;
 
             toast({ title: "创作完成", description: "小说已自动保存到书库" });
-          } catch (e: any) {
-            toast({ title: "保存失败", description: e.message, variant: "destructive" });
+          } catch (e) {
+            toast({
+              title: "保存失败",
+              description: e instanceof Error ? e.message : "未知错误",
+              variant: "destructive",
+            });
           }
-        } else if (mode === "outline" && user) {
+        } else if (mode === "outline") {
+          // 暂存大纲，点击「开始创作」时会随小说一起入库
+          setOutline(fullContent.trim());
           toast({ title: "大纲生成完成", description: "开始创作时将自动使用此大纲" });
         } else if (mode === "characters") {
           toast({ title: "人物卡生成完成" });

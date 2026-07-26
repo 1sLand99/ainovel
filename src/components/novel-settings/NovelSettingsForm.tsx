@@ -2,12 +2,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import {
   NovelSettings,
   createDefaultNovelSettings,
-  createEmptySideCharacter,
-  createEmptyAntagonist,
-  createEmptyPlotBeat,
-  createEmptyTaboo,
-  createEmptyReferenceWork,
+  normalizeNovelSettings,
 } from "./types";
+import { buildCopyPrompt } from "@/lib/build-prompt";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -112,47 +109,8 @@ export function NovelSettingsForm({
     try {
       const raw = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null;
       if (!raw) return;
-      const parsed = JSON.parse(raw) as Partial<NovelSettings>;
-      if (!parsed || typeof parsed !== "object") return;
-
-      setSettings((prev) => {
-        const sideCharacters = Array.isArray(parsed.sideCharacters)
-          ? parsed.sideCharacters.map((item) => ({ ...createEmptySideCharacter(), ...item }))
-          : prev.sideCharacters || [];
-        const antagonists = Array.isArray(parsed.antagonists)
-          ? parsed.antagonists.map((item) => ({ ...createEmptyAntagonist(), ...item }))
-          : prev.antagonists || [];
-        const taboos = Array.isArray(parsed.taboos)
-          ? parsed.taboos.map((item) => ({ ...createEmptyTaboo(), ...item }))
-          : prev.taboos || [];
-        const references = Array.isArray(parsed.references)
-          ? parsed.references.map((item) => ({ ...createEmptyReferenceWork(), ...item }))
-          : prev.references || [];
-        const middleBeats = Array.isArray(parsed.middleBeats)
-          ? parsed.middleBeats.map((item) => ({ ...createEmptyPlotBeat(), ...item }))
-          : prev.middleBeats || [];
-        const subplots = Array.isArray(parsed.subplots)
-          ? parsed.subplots.map((item) => ({ ...createEmptyPlotBeat(), ...item }))
-          : prev.subplots || [];
-        const genres = Array.isArray(parsed.genres)
-          ? parsed.genres
-          : (prev.genres || []);
-
-        return {
-          ...prev,
-          ...parsed,
-          genres,
-          mainCharacter: { ...prev.mainCharacter, ...(parsed.mainCharacter || {}) },
-          worldDetails: { ...prev.worldDetails, ...(parsed.worldDetails || {}) },
-          writingStyle: { ...prev.writingStyle, ...(parsed.writingStyle || {}) },
-          sideCharacters,
-          antagonists,
-          taboos,
-          references,
-          middleBeats,
-          subplots,
-        };
-      });
+      const parsed = JSON.parse(raw);
+      setSettings((prev) => normalizeNovelSettings(parsed, prev));
     } catch {
       // 忽略损坏的缓存数据
     }
@@ -218,49 +176,12 @@ export function NovelSettingsForm({
     if (!file) return;
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text) as NovelSettings;
-      if (!parsed || typeof parsed !== "object") {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("导入的数据格式不正确");
       }
 
-      setSettings((prev) => {
-        const sideCharacters = Array.isArray(parsed.sideCharacters)
-          ? parsed.sideCharacters.map((item) => ({ ...createEmptySideCharacter(), ...item }))
-          : prev.sideCharacters || [];
-        const antagonists = Array.isArray(parsed.antagonists)
-          ? parsed.antagonists.map((item) => ({ ...createEmptyAntagonist(), ...item }))
-          : prev.antagonists || [];
-        const taboos = Array.isArray(parsed.taboos)
-          ? parsed.taboos.map((item) => ({ ...createEmptyTaboo(), ...item }))
-          : prev.taboos || [];
-        const references = Array.isArray(parsed.references)
-          ? parsed.references.map((item) => ({ ...createEmptyReferenceWork(), ...item }))
-          : prev.references || [];
-        const middleBeats = Array.isArray(parsed.middleBeats)
-          ? parsed.middleBeats.map((item) => ({ ...createEmptyPlotBeat(), ...item }))
-          : prev.middleBeats || [];
-        const subplots = Array.isArray(parsed.subplots)
-          ? parsed.subplots.map((item) => ({ ...createEmptyPlotBeat(), ...item }))
-          : prev.subplots || [];
-        const genres = Array.isArray(parsed.genres)
-          ? parsed.genres
-          : (prev.genres || []);
-
-        return {
-          ...prev,
-          ...parsed,
-          genres,
-          mainCharacter: { ...prev.mainCharacter, ...(parsed.mainCharacter || {}) },
-          worldDetails: { ...prev.worldDetails, ...(parsed.worldDetails || {}) },
-          writingStyle: { ...prev.writingStyle, ...(parsed.writingStyle || {}) },
-          sideCharacters,
-          antagonists,
-          taboos,
-          references,
-          middleBeats,
-          subplots,
-        };
-      });
+      setSettings((prev) => normalizeNovelSettings(parsed, prev));
       toast({ title: "导入成功" });
     } catch (err: any) {
       toast({
@@ -273,116 +194,9 @@ export function NovelSettingsForm({
     }
   };
 
-  // 拼接并构建小说创作提示词
-  const buildPrompt = (s: NovelSettings): string => {
-    const lines: string[] = [];
-    lines.push("你现在是一名经验丰富的中文网络小说作者，请严格按照以下设定创作：");
-    lines.push("");
-    lines.push("【作品信息】");
-    lines.push(`题材：${s.genres.join("、") || "未指定"}`);
-    lines.push(`一句话简介：${s.oneLinePitch || "未填写"}`);
-    lines.push("");
-    lines.push("【主角设定】");
-    lines.push(
-      `姓名：${s.mainCharacter.name || "未命名"}，性别：${s.mainCharacter.gender}，年龄：${
-        s.mainCharacter.age || "未知"
-      }，性格：${s.mainCharacter.personality || "未填写"}`,
-    );
-    lines.push("");
-    if (s.sideCharacters.length) {
-      lines.push("【配角设定】");
-      s.sideCharacters.forEach((c, idx) => {
-        const relation =
-          c.relationshipCustom || c.relationship || "未填写关系";
-        const tags = c.personalityTags.join("、") || "未填写性格";
-        lines.push(
-          `${idx + 1}. ${c.name || "未命名"}（${relation}）：性格【${tags}】，背景【${
-            c.background || "未填写"
-          }】，能力/弱点【${c.abilities || "未填写"}】，故事作用【${c.role || "未填写"}】，人物弧光【${
-            c.arcCustom || c.arc || "未填写"
-          }】`,
-        );
-      });
-      lines.push("");
-    }
-    if (s.antagonists.length) {
-      lines.push("【反派 / 敌人】");
-      s.antagonists.forEach((c, idx) => {
-        const relation =
-          c.relationshipCustom || c.relationship || "未填写关系";
-        const tags = c.personalityTags.join("、") || "未填写性格";
-        lines.push(
-          `${idx + 1}. ${c.name || "未命名"}（${relation}）：性格【${tags}】，背景【${
-            c.background || "未填写"
-          }】，能力/弱点【${c.abilities || "未填写"}】，动机【${
-            c.motive || "未填写"
-          }】，最终下场【${c.fate || "未填写"}】，人物弧光【${
-            c.arcCustom || c.arc || "未填写"
-          }】`,
-        );
-      });
-      lines.push("");
-    }
-    lines.push("【世界观与规则】");
-    lines.push(`整体背景：${s.worldSummary || "未填写"}`);
-    lines.push(`核心冲突 / 主题：${s.conflictTheme || "未填写"}`);
-    lines.push(`力量 / 科技 / 修炼体系：${s.worldDetails.powerSystem || "未填写"}`);
-    lines.push(`社会结构与势力分布：${s.worldDetails.factions || "未填写"}`);
-    lines.push(`历史重大事件：${s.worldDetails.historyEvents || "未填写"}`);
-    lines.push(`重要地点：${s.worldDetails.importantLocations || "未填写"}`);
-    lines.push(`文化习俗与禁忌：${s.worldDetails.cultureAndTaboos || "未填写"}`);
-    lines.push("");
-    lines.push("【情节大纲】");
-    lines.push(`开头（前 30%）：${s.opening || "未填写"}`);
-    if (s.middleBeats.length) {
-      lines.push("中段高潮与关键转折：");
-      s.middleBeats.forEach((b, idx) => {
-        lines.push(`${idx + 1}. ${b.title || "未命名节点"}：${b.detail || "未填写"}`);
-      });
-    }
-    if (s.subplots.length) {
-      lines.push("主要副线：");
-      s.subplots.forEach((b, idx) => {
-        lines.push(`${idx + 1}. ${b.title || "未命名副线"}：${b.detail || "未填写"}`);
-      });
-    }
-    lines.push(`结局类型：${s.endingType || "未指定"}`);
-    lines.push("");
-    lines.push("【写作风格与重点】");
-    lines.push(`叙述视角：${s.writingStyle.narration}`);
-    lines.push(`整体语气：${s.writingStyle.tones.join("、") || "未指定"}`);
-    lines.push(`金手指程度：${s.writingStyle.cheatLevel}`);
-    lines.push(`重点描写内容：${s.writingStyle.focusAreas.join("、") || "未指定"}`);
-    lines.push(
-      `建议篇幅：全书约 ${s.totalWords} 字，每章约 ${s.writingStyle.wordsPerChapter} 字，temperature≈${s.writingStyle.temperature}`,
-    );
-    if (s.nsfw) lines.push("允许适度 NSFW 内容。");
-    if (s.systemNovel) lines.push("这是系统文，主角拥有类似面板/系统等金手指。");
-    if (s.harem) lines.push("允许存在后宫元素。");
-    lines.push("");
-    if (s.taboos.length) {
-      lines.push("【写作禁忌】");
-      s.taboos.forEach((t, idx) => {
-        if (t.content.trim()) lines.push(`${idx + 1}. ${t.content.trim()}`);
-      });
-      lines.push("");
-    }
-    if (s.references.length) {
-      lines.push("【参考作品与借鉴点】");
-      s.references.forEach((r, idx) => {
-        lines.push(
-          `${idx + 1}. 《${r.title || "未命名"}》：${r.inspiration || "未填写借鉴点"}`,
-        );
-      });
-      lines.push("");
-    }
-    lines.push("请在创作过程中严格遵守以上所有设定，保证人物行为、世界观规则和情节发展前后一致。");
-    return lines.join("\n");
-  };
-
   // 生成提示词并复制到剪贴板
   const handleCopyPrompt = async () => {
-    const prompt = buildPrompt(settings);
+    const prompt = buildCopyPrompt(settings);
     const success = await copyToClipboard(prompt);
     if (success) {
       toast({ title: "提示词已生成", description: "已复制到剪贴板，可直接粘贴到 AI 中" });

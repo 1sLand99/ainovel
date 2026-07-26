@@ -6,7 +6,7 @@ import { PROVIDER_TYPES, type ModelProvider } from "@/lib/provider-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
@@ -54,17 +54,27 @@ export default function SettingsPage() {
     if (!user) return;
     fetchProviders();
     supabase.from("profiles").select("nsfw_enabled").eq("user_id", user.id).single()
-      .then(({ data }) => { if (data) setNsfw(data.nsfw_enabled || false); });
+      .then(({ data }: { data: { nsfw_enabled?: boolean } | null }) => {
+        if (data) setNsfw(data.nsfw_enabled || false);
+      });
   }, [user]);
 
   const fetchProviders = async () => {
-    if (!user) return;
-    const { data } = await supabase
+    if (!user) {
+      // 没有用户时同样要结束 loading，否则页面永远停在骨架屏
+      setLoadingProviders(false);
+      return;
+    }
+    const { data, error } = await supabase
       .from("model_providers")
       .select("*")
       .eq("user_id", user.id)
       .order("created_at", { ascending: true });
-    if (data) setProviders(data as unknown as ModelProvider[]);
+    if (error) {
+      toast({ title: "加载失败", description: error.message, variant: "destructive" });
+    } else if (data) {
+      setProviders(data as unknown as ModelProvider[]);
+    }
     setLoadingProviders(false);
   };
 
@@ -120,7 +130,11 @@ export default function SettingsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    await supabase.from("model_providers").delete().eq("id", id);
+    const { error } = await supabase.from("model_providers").delete().eq("id", id);
+    if (error) {
+      toast({ title: "删除失败", description: error.message, variant: "destructive" });
+      return;
+    }
     toast({ title: "已删除" });
     fetchProviders();
     window.dispatchEvent(new CustomEvent("model-settings-changed"));
@@ -225,17 +239,21 @@ export default function SettingsPage() {
         if (res.ok) {
           toast({ title: "✅ 连接测试成功", description: "API 响应正常，配置已生效" });
         } else {
-          const rawText = await res.text();
+          // 复用 formatProviderError：它会解析各家 API 的 JSON 错误体，
+          // 比直接截断原始响应文本更可读
           toast({
             title: "❌ 连接失败",
-            description: `直连 API 报错 [状态码 ${res.status}]: ${rawText.slice(0, 100)}`,
+            description: `直连 API 报错: ${await formatProviderError(res)}`,
             variant: "destructive"
           });
         }
-      } catch (e: any) {
+      } catch (e) {
         toast({
           title: "❌ 连接失败",
-          description: e.message || "请求发送超时，请确认 API 地址是否可达",
+          description:
+            e instanceof Error && e.message
+              ? e.message
+              : "请求发送超时，请确认 API 地址是否可达",
           variant: "destructive"
         });
       }

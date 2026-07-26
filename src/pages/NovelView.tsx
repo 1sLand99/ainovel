@@ -18,7 +18,7 @@ export default function NovelView() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { user, session } = useAuth();
+  const { user } = useAuth();
 
   const [novel, setNovel] = useState<NovelData | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -50,7 +50,6 @@ export default function NovelView() {
     novel,
     chapters,
     selectedChapter,
-    session,
     effectiveProvider,
     currentApiKey,
     effectiveApiBaseUrl,

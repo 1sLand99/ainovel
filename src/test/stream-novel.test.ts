@@ -55,7 +55,6 @@ describe("streamNovelGeneration", () => {
       onDelta,
       onDone,
       onError,
-      accessToken: "test-token",
     });
 
     expect(onDelta).toHaveBeenCalledTimes(2);
@@ -113,7 +112,6 @@ describe("streamNovelGeneration", () => {
       onDelta,
       onDone,
       onError,
-      accessToken: "test-token",
     });
 
     // 验证截断内容成功被拼接并正确解析
@@ -167,7 +165,6 @@ describe("streamNovelGeneration", () => {
       onDelta,
       onDone,
       onError,
-      accessToken: "test-token",
     });
 
     // 验证流能够成功恢复且没有被死锁假死，并最终能消费完所有正确的内容
@@ -178,7 +175,7 @@ describe("streamNovelGeneration", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it("当接口返回 401 错误时应当触发 onError 并提示登录过期", async () => {
+  it("当接口返回 401 错误时应当触发 onError 并提示 API Key 无效", async () => {
     const mockResponse = {
       ok: false,
       status: 401,
@@ -201,10 +198,10 @@ describe("streamNovelGeneration", () => {
       onDelta,
       onDone,
       onError,
-      accessToken: "test-token",
     });
 
-    expect(onError).toHaveBeenCalledWith("登录已过期，请重新登录");
+    // 本地模式没有登录系统，401 只可能是 API Key 无效，提示语应指向「模型设置」
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("API Key 无效"));
     expect(onDelta).not.toHaveBeenCalled();
     expect(onDone).not.toHaveBeenCalled();
   });
@@ -257,7 +254,6 @@ describe("streamNovelGeneration", () => {
       onDelta,
       onDone,
       onError,
-      accessToken: "test-token",
     });
 
     // 这里由于 stream-novel.ts 存在回滚死锁（挂起/污染）缺陷，导致后续正常包2的数据也一起丢失。
@@ -312,7 +308,6 @@ describe("streamNovelGeneration", () => {
       onDelta,
       onDone,
       onError,
-      accessToken: "test-token",
     });
 
     // 检查合法部分是否成功解析，且垃圾数据没有导致整体抛错或崩溃

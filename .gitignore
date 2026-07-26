@@ -27,3 +27,7 @@ dist-ssr
 # Supabase local CLI temp files
 supabase/.temp/
 .agents/
+
+# 本地环境变量（不应提交）
+.env
+.env.local

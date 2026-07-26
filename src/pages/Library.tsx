@@ -63,11 +63,13 @@ export default function LibraryPage() {
   });
 
   const exportNovel = async (novel: Novel, format: "txt" | "md") => {
-    const { data: chapters } = await supabase
+    const { data: chapters } = (await supabase
       .from("chapters")
       .select("chapter_number, title, content")
       .eq("novel_id", novel.id)
-      .order("chapter_number");
+      .order("chapter_number")) as {
+      data: Array<{ chapter_number: number; title: string; content: string }> | null;
+    };
 
     if (!chapters || chapters.length === 0) {
       toast({ title: "无章节内容", description: "该小说暂无章节可导出", variant: "destructive" });
@@ -107,6 +109,18 @@ export default function LibraryPage() {
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
+    // 先删章节再删小说：本地存储没有外键级联，漏删会留下永远读不到的孤儿章节，
+    // 白白占用 localStorage 配额。
+    const { error: chaptersError } = await supabase
+      .from("chapters")
+      .delete()
+      .eq("novel_id", deleteTarget.id);
+    if (chaptersError) {
+      toast({ title: "删除失败", description: chaptersError.message, variant: "destructive" });
+      setDeleteTarget(null);
+      return;
+    }
+
     const { error } = await supabase.from("novels").delete().eq("id", deleteTarget.id);
     if (error) {
       toast({ title: "删除失败", description: error.message, variant: "destructive" });

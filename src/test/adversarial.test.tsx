@@ -3,8 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { streamNovelGeneration } from "../lib/stream-novel";
 import { NovelSettingsForm } from "../components/novel-settings/NovelSettingsForm";
 import NovelView from "../pages/NovelView";
-import { supabase, setMockDataForTable, clearSupabaseMocks } from "./mocks/supabase";
-import React from "react";
+import { setMockDataForTable, clearSupabaseMocks } from "./mocks/supabase";
 
 // Mock React Router
 vi.mock("react-router-dom", () => ({
@@ -135,21 +134,13 @@ describe("Adversarial Testing - 对抗性与异常边界测试", () => {
       onDelta,
       onDone,
       onError,
-      accessToken: "test-token",
     });
 
-    // 理论上，如果能妥善处理切包：
-    // - "正常一" 应当被解析输出。
-    // - "第二包残缺" 应当与后面的 `"}}]}"` 拼合，输出 `"第二包残缺"`。
-    // - "正常三" 和 "正常四" 也应该被正确解析输出。
-    // 然而，因为 `buffer = line + buffer;` 导致了粘连污染（"第二包残缺" 与 "正常三" 粘连，拼合后变成无法解析的畸形 JSON）。
-    // 所以，"正常三" 和 "正常四" 将因粘连污染而在 JSON.parse 时不断报错，无法被解析出来。
-    
-    // 我们在此断言，目前的实现会导致数据丢失，即 "正常三" 无法被正确消费输出。
-    // 正常期望应当是包含 "正常三" 和 "正常四" 的调用，但实际实现由于粘连污染导致失败：
+    // 分包截断已修复：残缺的 JSON 行会被放回 buffer 等待后续分包补齐，
+    // 且不会污染同一批到达的后续正常数据行。
     const receivedDeltas = onDelta.mock.calls.map(call => call[0]);
-    
-    // 修改为正向断言，期待流式生成已修复，能正确解析并包含正常三和正常四
+
+    expect(receivedDeltas).toContain("正常一");
     expect(receivedDeltas).toContain("正常三");
     expect(receivedDeltas).toContain("正常四");
   });
@@ -242,7 +233,7 @@ describe("Adversarial Testing - 对抗性与异常边界测试", () => {
       localStorage.setItem("novel_settings_v1", JSON.stringify(badData));
 
       // 渲染组件
-      const { container, unmount } = render(
+      const { unmount } = render(
         <NovelSettingsForm
           modelName="GPT-4"
           isGenerating={false}
@@ -265,17 +256,8 @@ describe("Adversarial Testing - 对抗性与异常边界测试", () => {
 
   // ==================== 异常流连接断开、网络异常与重连测试 ====================
   it("网络异常捕捉测试：当流式生成遇到网络异常抛错时，页面组件应妥善捕捉，防止 isGenerating 锁死", async () => {
-    // 精细化 Mock fetch：仅在包含 generate-novel 时拦截抛出网络错误，其他 fetch 请求放行返回默认的成功响应
-    mockFetch.mockImplementation((url: any) => {
-      const urlStr = typeof url === "string" ? url : url?.url || "";
-      if (urlStr.includes("/functions/v1/generate-novel")) {
-        return Promise.reject(new Error("TypeError: Failed to fetch"));
-      }
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ id: "test", title: "测试网络小说", content: "..." }),
-      });
-    });
+    // 本地模式下直连大模型接口，这里模拟该请求在网络层直接失败
+    mockFetch.mockRejectedValue(new Error("Failed to fetch"));
 
     const { container } = render(<NovelView />);
     await screen.findAllByText("测试网络小说");

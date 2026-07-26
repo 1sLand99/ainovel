@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import NovelView from "../pages/NovelView";
 import { supabase, setMockDataForTable, clearSupabaseMocks, mockUpdateSpy, mockEqSpy } from "./mocks/supabase";
-import React from "react";
 import { streamNovelGeneration } from "@/lib/stream-novel";
 
 // Mock React Router
@@ -706,7 +705,7 @@ describe("NovelView 页面综合功能测试", () => {
   });
 
   it("正在生成中时再次点击生成下一章应当被内存拦截防重", async () => {
-    const { container } = render(<NovelView />);
+    render(<NovelView />);
     await screen.findAllByText("测试网络小说");
 
     const continueBtn = screen.getByRole("button", { name: /生成下一章/ });
@@ -968,7 +967,7 @@ describe("NovelView 页面综合功能测试", () => {
       return builder;
     });
 
-    const { container } = render(<NovelView />);
+    render(<NovelView />);
     await screen.findAllByText("测试网络小说");
 
     // 重置 mock 调用计数
